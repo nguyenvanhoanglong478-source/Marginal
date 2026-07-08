@@ -1,0 +1,9 @@
+name = "marginal-api"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Optional: restrict which frontend origin may call this Worker.
+# Leave commented to allow any origin (simplest while you're testing).
+# [vars]
+# ALLOWED_ORIGIN = "https://ten-ban.github.io"
+# GEMINI_MODEL = "gemini-2.5-flash"

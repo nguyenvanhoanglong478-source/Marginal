@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+/* Reading column typography */
+.prose-read {
+  font-family: 'Literata', serif;
+  font-size: 1.125rem;
+  line-height: 1.85;
+  color: #21262F;
+}
+
+/* Clickable sentence in the article */
+.sentence {
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background-color 120ms ease;
+}
+.sentence:hover {
+  background-color: #E4ECF3;
+}
+.sentence.is-active {
+  background-color: #FFD666;
+  box-shadow: 0 0 0 2px #FFD666;
+}
+
+/* Margin annotation cards — the signature element:
+   small pinned notes, each with a faint independent tilt,
+   mimicking handwritten margin notes on a printed paper. */
+.margin-note {
+  background: #ffffff;
+  border: 1px solid #E4E1D8;
+  border-left: 3px solid #2F5D8A;
+  box-shadow: 1px 2px 6px rgba(33, 38, 47, 0.06);
+  transform: rotate(var(--tilt, -0.6deg));
+}
+.margin-note:nth-child(2n) {
+  --tilt: 0.7deg;
+}
+.margin-note:nth-child(3n) {
+  --tilt: -0.4deg;
+}
+
+/* Grammar correction marks — like red-pen edits */
+mark.correction {
+  background: rgba(193, 84, 60, 0.14);
+  color: #C1543C;
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+mark.suggestion {
+  background: rgba(107, 143, 113, 0.16);
+  color: #3f5a44;
+  padding: 0 2px;
+  border-radius: 2px;
+  text-decoration: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
