@@ -19,7 +19,6 @@ export default function ArticleReader() {
 
   const [targetLang, setTargetLang] = useState('vi')
   const [activeId, setActiveId] = useState(null)
-  const [clickedIds, setClickedIds] = useState([]) // order in which sentences were opened
   const [translations, setTranslations] = useState(null) // id -> translation, once batch call resolves
   const [translating, setTranslating] = useState(false)
   const [translateError, setTranslateError] = useState('')
@@ -44,12 +43,21 @@ export default function ArticleReader() {
     return flat
   }, [paragraphs])
 
+  // Once translations are in, rebuild them into the same paragraph shape
+  // as the original — one continuous block of translated prose per
+  // paragraph, not a list of separate sentence fragments.
+  const translatedParagraphs = useMemo(() => {
+    if (!translations) return []
+    return paragraphs.map((sentences, pIdx) =>
+      sentences.map((_, sIdx) => translations[`p${pIdx}-s${sIdx}`] || '').join(' '),
+    )
+  }, [translations, paragraphs])
+
   // A new article, or a different target language, invalidates any
   // translations we already fetched.
   useEffect(() => {
     setTranslations(null)
     setTranslateError('')
-    setClickedIds([])
     setActiveId(null)
   }, [articleText, targetLang])
 
@@ -102,14 +110,12 @@ export default function ArticleReader() {
 
   async function handleTranslateAll() {
     setRailTab('notes')
-    setClickedIds(flatSentences.map((f) => f.id))
     await ensureTranslations()
   }
 
   function handleSentenceClick(id) {
     setActiveId(id)
     setRailTab('notes')
-    setClickedIds((prev) => (prev.includes(id) ? prev : [...prev, id]))
     ensureTranslations() // no-op if already loaded/loading; one call covers the whole article
   }
 
@@ -123,17 +129,6 @@ export default function ArticleReader() {
     setSpeaking(true)
     if (utter) utter.onend = () => setSpeaking(false)
   }
-
-  // Look up a sentence's text by id, for rendering the margin rail.
-  const sentenceById = useMemo(() => {
-    const map = {}
-    flatSentences.forEach((f) => {
-      map[f.id] = f.sentence
-    })
-    return map
-  }, [flatSentences])
-
-  const orderedClickedIds = [...clickedIds].reverse()
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-8">
@@ -286,22 +281,34 @@ export default function ArticleReader() {
           </div>
 
           {railTab === 'notes' && (
-            <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-1">
-              {orderedClickedIds.length === 0 && (
+            <div className="max-h-[70vh] overflow-y-auto pr-1">
+              {!translations && !translating && !translateError && (
                 <p className="text-xs text-inkSoft italic px-1">
-                  Nhấn vào một câu trong bài (hoặc "Dịch toàn bài" ở trên) để xem bản dịch ở đây.
+                  Bấm "Dịch toàn bài" ở trên (hoặc nhấn vào một câu trong bài) để xem bản dịch cả
+                  bài ở đây.
                 </p>
               )}
-              {translateError && <p className="text-sm text-bad px-1">{translateError}</p>}
-              {orderedClickedIds.map((id) => (
-                <div key={id} className="margin-note rounded-md p-3">
-                  <p className="text-xs text-inkSoft mb-1 line-clamp-2">{sentenceById[id]}</p>
-                  {translating && !translations && <p className="text-sm text-inkSoft">Đang dịch…</p>}
-                  {translations && translations[id] && (
-                    <p className="text-sm font-medium">{translations[id]}</p>
-                  )}
+              {translating && <p className="text-sm text-inkSoft px-1">Đang dịch cả bài…</p>}
+              {translateError && (
+                <div className="text-sm text-bad px-1">
+                  <p>{translateError}</p>
+                  <button
+                    onClick={ensureTranslations}
+                    className="mt-2 text-xs underline hover:no-underline"
+                  >
+                    Thử lại
+                  </button>
                 </div>
-              ))}
+              )}
+              {translations && (
+                <div className="space-y-4">
+                  {translatedParagraphs.map((text, i) => (
+                    <p key={i} className="text-sm leading-relaxed">
+                      {text}
+                    </p>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
