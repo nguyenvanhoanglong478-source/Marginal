@@ -42,6 +42,40 @@ export function translateText(text, targetLang = 'vi') {
   return callApi('/api/translate', { text, targetLang })
 }
 
+// Translates a whole article's sentences in as few backend calls as
+// possible (chunked only if the article is very long), instead of one
+// call per sentence — this is what keeps reading from burning through
+// Gemini's free-tier per-minute request limit.
+const BATCH_CHUNK_MAX_CHARS = 6000
+const BATCH_CHUNK_MAX_SENTENCES = 60
+
+export async function translateSentences(sentences, targetLang = 'vi') {
+  const chunks = []
+  let current = []
+  let currentChars = 0
+
+  for (const sentence of sentences) {
+    const wouldOverflow =
+      current.length >= BATCH_CHUNK_MAX_SENTENCES ||
+      currentChars + sentence.length > BATCH_CHUNK_MAX_CHARS
+    if (wouldOverflow && current.length > 0) {
+      chunks.push(current)
+      current = []
+      currentChars = 0
+    }
+    current.push(sentence)
+    currentChars += sentence.length
+  }
+  if (current.length > 0) chunks.push(current)
+
+  const allTranslations = []
+  for (const chunk of chunks) {
+    const { translations } = await callApi('/api/translate-batch', { sentences: chunk, targetLang })
+    allTranslations.push(...translations)
+  }
+  return allTranslations
+}
+
 // Sends free-form writing for spelling/grammar review.
 export function checkWriting(text, language = 'en') {
   return callApi('/api/grammar', { text, language })

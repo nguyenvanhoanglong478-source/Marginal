@@ -75,14 +75,19 @@ async function callGemini(env, { systemInstruction, contents, jsonMode = false, 
   return text
 }
 
+// Shared instruction for both single-text and batch translation, so the
+// two endpoints stay consistent in tone/quality.
+function translateSystemInstruction(targetLang) {
+  return targetLang === 'en'
+    ? `You are an expert English translator helping a Vietnamese student read and write academic material in English. Translate the given Vietnamese text into natural, fluent English — the way an English-speaking academic would actually write it, not a literal word-for-word rendering. Keep technical and scientific terminology precise.`
+    : `You are an expert Vietnamese translator helping a student understand an academic article written in English. Translate the given text into natural, fluent Vietnamese — the way it would actually be written in a Vietnamese academic article, not a stiff word-for-word translation. Prioritize meaning and natural Vietnamese sentence flow over mirroring the English sentence structure: feel free to reorder clauses, split a long sentence into two, or merge short ones, whatever reads most naturally. Keep technical/scientific terms accurate; if a Vietnamese term is uncommon, add the original English term in parentheses on first use.`
+}
+
 async function handleTranslate(request, env) {
   const { text, targetLang } = await request.json()
   if (!text || !text.trim()) return errorResponse('Thiếu nội dung cần dịch.', env)
 
-  const systemInstruction =
-    targetLang === 'en'
-      ? `You are an expert English translator helping a Vietnamese student read and write academic material in English. Translate the given Vietnamese text into natural, fluent English — the way an English-speaking academic would actually write it, not a literal word-for-word rendering. Keep technical and scientific terminology precise. Return ONLY the translation — no notes, no quotation marks, no preamble.`
-      : `You are an expert Vietnamese translator helping a student understand an academic article written in English. Translate the given text into natural, fluent Vietnamese — the way it would actually be written in a Vietnamese academic article, not a stiff word-for-word translation. Prioritize meaning and natural Vietnamese sentence flow over mirroring the English sentence structure: feel free to reorder clauses, split a long sentence into two, or merge short ones, whatever reads most naturally. Keep technical/scientific terms accurate; if a Vietnamese term is uncommon, add the original English term in parentheses on first use. Return ONLY the translation — no notes, no quotation marks, no preamble.`
+  const systemInstruction = `${translateSystemInstruction(targetLang)} Return ONLY the translation — no notes, no quotation marks, no preamble.`
 
   const translation = await callGemini(env, {
     systemInstruction,
@@ -91,6 +96,50 @@ async function handleTranslate(request, env) {
   })
 
   return jsonResponse({ translation: translation.trim() }, env)
+}
+
+// Translates every sentence of an article in a single Gemini call instead
+// of one call per sentence — this is what keeps click-to-translate reading
+// from blowing through Gemini's free-tier per-minute request limit.
+const MAX_BATCH_SENTENCES = 200
+const MAX_BATCH_CHARS = 20000
+
+async function handleTranslateBatch(request, env) {
+  const { sentences, targetLang } = await request.json()
+
+  if (!Array.isArray(sentences) || sentences.length === 0) {
+    return errorResponse('Thiếu danh sách câu cần dịch.', env)
+  }
+  if (sentences.length > MAX_BATCH_SENTENCES) {
+    return errorResponse(`Gói dịch quá lớn (tối đa ${MAX_BATCH_SENTENCES} câu/lần).`, env)
+  }
+  const totalChars = sentences.reduce((sum, s) => sum + (s ? s.length : 0), 0)
+  if (totalChars > MAX_BATCH_CHARS) {
+    return errorResponse('Gói dịch quá lớn, vui lòng chia nhỏ bài viết.', env)
+  }
+
+  const systemInstruction = `${translateSystemInstruction(targetLang)}
+
+You will receive a JSON array of sentences from the article, in order. Return ONLY a JSON array of strings — exactly one translated string per input sentence, in the exact same order, with the exact same number of elements as the input array. Do not merge, split, skip, reorder, or add sentences, and do not include the original text or any explanation — output only the JSON array of translations.`
+
+  const raw = await callGemini(env, {
+    systemInstruction,
+    contents: [{ role: 'user', parts: [{ text: JSON.stringify(sentences) }] }],
+    jsonMode: true,
+    temperature: 0.4,
+  })
+
+  let translations
+  try {
+    translations = JSON.parse(raw)
+  } catch {
+    throw new Error('Không đọc được phản hồi dịch từ AI, vui lòng thử lại.')
+  }
+  if (!Array.isArray(translations) || translations.length !== sentences.length) {
+    throw new Error('AI trả về số câu dịch không khớp với bài gốc, vui lòng thử lại.')
+  }
+
+  return jsonResponse({ translations }, env)
 }
 
 async function handleGrammar(request, env) {
@@ -279,6 +328,9 @@ export default {
     try {
       if (request.method === 'POST' && pathname === '/api/translate') {
         return await handleTranslate(request, env)
+      }
+      if (request.method === 'POST' && pathname === '/api/translate-batch') {
+        return await handleTranslateBatch(request, env)
       }
       if (request.method === 'POST' && pathname === '/api/grammar') {
         return await handleGrammar(request, env)

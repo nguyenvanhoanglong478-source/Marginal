@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react'
-import { fetchArticleFromUrl, translateText } from '../lib/api'
+import { useState, useMemo, useEffect, useRef } from 'react'
+import { fetchArticleFromUrl, translateSentences } from '../lib/api'
 import { splitParagraphs, splitSentences } from '../lib/text'
 import { speak, stopSpeaking, isTTSSupported, isSpeaking } from '../lib/speech'
 import ChatPanel from './ChatPanel'
@@ -19,14 +19,63 @@ export default function ArticleReader() {
 
   const [targetLang, setTargetLang] = useState('vi')
   const [activeId, setActiveId] = useState(null)
-  const [notes, setNotes] = useState({}) // id -> { sentence, translation, loading, error }
+  const [clickedIds, setClickedIds] = useState([]) // order in which sentences were opened
+  const [translations, setTranslations] = useState(null) // id -> translation, once batch call resolves
+  const [translating, setTranslating] = useState(false)
+  const [translateError, setTranslateError] = useState('')
   const [railTab, setRailTab] = useState('notes') // 'notes' | 'chat'
   const [speaking, setSpeaking] = useState(false)
+  const translateRunRef = useRef(0) // guards against a stale in-flight call overwriting a newer one
 
   const paragraphs = useMemo(() => {
     if (!articleText) return []
     return splitParagraphs(articleText).map((p) => splitSentences(p))
   }, [articleText])
+
+  // Flat list of every sentence with a stable id, used for the one-shot
+  // batch translation call.
+  const flatSentences = useMemo(() => {
+    const flat = []
+    paragraphs.forEach((sentences, pIdx) => {
+      sentences.forEach((sentence, sIdx) => {
+        flat.push({ id: `p${pIdx}-s${sIdx}`, sentence })
+      })
+    })
+    return flat
+  }, [paragraphs])
+
+  // A new article, or a different target language, invalidates any
+  // translations we already fetched.
+  useEffect(() => {
+    setTranslations(null)
+    setTranslateError('')
+    setClickedIds([])
+    setActiveId(null)
+  }, [articleText, targetLang])
+
+  async function ensureTranslations() {
+    if (translations || translating || flatSentences.length === 0) return
+    const runId = ++translateRunRef.current
+    setTranslating(true)
+    setTranslateError('')
+    try {
+      const list = await translateSentences(
+        flatSentences.map((f) => f.sentence),
+        targetLang,
+      )
+      if (runId !== translateRunRef.current) return // article/language changed mid-flight
+      const map = {}
+      flatSentences.forEach((f, i) => {
+        map[f.id] = list[i]
+      })
+      setTranslations(map)
+    } catch (err) {
+      if (runId !== translateRunRef.current) return
+      setTranslateError(err.message)
+    } finally {
+      if (runId === translateRunRef.current) setTranslating(false)
+    }
+  }
 
   async function handleLoadArticle(e) {
     e.preventDefault()
@@ -36,8 +85,6 @@ export default function ArticleReader() {
     if (inputMode === 'paste') {
       setArticleTitle('')
       setArticleText(rawInput.trim())
-      setNotes({})
-      setActiveId(null)
       return
     }
 
@@ -46,8 +93,6 @@ export default function ArticleReader() {
       const { title, text } = await fetchArticleFromUrl(rawInput.trim())
       setArticleTitle(title || '')
       setArticleText(text)
-      setNotes({})
-      setActiveId(null)
     } catch (err) {
       setArticleError(err.message)
     } finally {
@@ -55,21 +100,11 @@ export default function ArticleReader() {
     }
   }
 
-  async function handleSentenceClick(id, sentence) {
+  function handleSentenceClick(id) {
     setActiveId(id)
     setRailTab('notes')
-    if (notes[id]) return // already translated, just show it
-
-    setNotes((prev) => ({ ...prev, [id]: { sentence, loading: true } }))
-    try {
-      const { translation } = await translateText(sentence, targetLang)
-      setNotes((prev) => ({ ...prev, [id]: { sentence, translation, loading: false } }))
-    } catch (err) {
-      setNotes((prev) => ({
-        ...prev,
-        [id]: { sentence, loading: false, error: err.message },
-      }))
-    }
+    setClickedIds((prev) => (prev.includes(id) ? prev : [...prev, id]))
+    ensureTranslations() // no-op if already loaded/loading; one call covers the whole article
   }
 
   function handleToggleListen() {
@@ -83,10 +118,16 @@ export default function ArticleReader() {
     if (utter) utter.onend = () => setSpeaking(false)
   }
 
-  const activeNote = activeId ? notes[activeId] : null
-  const orderedNotes = Object.entries(notes)
-    .filter(([id]) => notes[id])
-    .reverse()
+  // Look up a sentence's text by id, for rendering the margin rail.
+  const sentenceById = useMemo(() => {
+    const map = {}
+    flatSentences.forEach((f) => {
+      map[f.id] = f.sentence
+    })
+    return map
+  }, [flatSentences])
+
+  const orderedClickedIds = [...clickedIds].reverse()
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-8">
@@ -176,6 +217,13 @@ export default function ArticleReader() {
                     </option>
                   ))}
                 </select>
+                <button
+                  onClick={ensureTranslations}
+                  disabled={translating || !!translations}
+                  className="text-xs px-3 py-1 rounded-md bg-panel hover:bg-accentSoft font-medium disabled:opacity-50"
+                >
+                  {translating ? 'Đang dịch…' : translations ? '✓ Đã dịch toàn bài' : '📖 Dịch toàn bài'}
+                </button>
                 {isTTSSupported() && (
                   <button
                     onClick={handleToggleListen}
@@ -197,7 +245,7 @@ export default function ArticleReader() {
                     return (
                       <span
                         key={id}
-                        onClick={() => handleSentenceClick(id, sentence)}
+                        onClick={() => handleSentenceClick(id)}
                         className={`sentence ${activeId === id ? 'is-active' : ''}`}
                       >
                         {sentence}{' '}
@@ -233,18 +281,18 @@ export default function ArticleReader() {
 
           {railTab === 'notes' && (
             <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-1">
-              {orderedNotes.length === 0 && (
+              {orderedClickedIds.length === 0 && (
                 <p className="text-xs text-inkSoft italic px-1">
-                  Nhấn vào một câu trong bài để xem chú thích và bản dịch ở đây.
+                  Nhấn vào một câu trong bài (hoặc "Dịch toàn bài" ở trên) để xem bản dịch ở đây.
                 </p>
               )}
-              {orderedNotes.map(([id, note]) => (
+              {translateError && <p className="text-sm text-bad px-1">{translateError}</p>}
+              {orderedClickedIds.map((id) => (
                 <div key={id} className="margin-note rounded-md p-3">
-                  <p className="text-xs text-inkSoft mb-1 line-clamp-2">{note.sentence}</p>
-                  {note.loading && <p className="text-sm text-inkSoft">Đang dịch…</p>}
-                  {note.error && <p className="text-sm text-bad">{note.error}</p>}
-                  {note.translation && (
-                    <p className="text-sm font-medium">{note.translation}</p>
+                  <p className="text-xs text-inkSoft mb-1 line-clamp-2">{sentenceById[id]}</p>
+                  {translating && !translations && <p className="text-sm text-inkSoft">Đang dịch…</p>}
+                  {translations && translations[id] && (
+                    <p className="text-sm font-medium">{translations[id]}</p>
                   )}
                 </div>
               ))}
