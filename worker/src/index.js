@@ -32,7 +32,7 @@ function errorResponse(message, env, status = 400) {
 
 // ---- Gemini -----------------------------------------------------------
 
-async function callGemini(env, { systemInstruction, contents, jsonMode = false }) {
+async function callGemini(env, { systemInstruction, contents, jsonMode = false, temperature = 0.3 }) {
   if (!env.GEMINI_API_KEY) {
     throw new Error('Chưa cấu hình GEMINI_API_KEY trên Worker (xem README).')
   }
@@ -44,12 +44,23 @@ async function callGemini(env, { systemInstruction, contents, jsonMode = false }
     ...(systemInstruction
       ? { systemInstruction: { parts: [{ text: systemInstruction }] } }
       : {}),
-    generationConfig: jsonMode ? { responseMimeType: 'application/json' } : {},
+    generationConfig: {
+      ...(jsonMode ? { responseMimeType: 'application/json' } : {}),
+      temperature,
+    },
   }
 
-  const res = await fetch(apiUrl, {
+  // Route the actual outbound call through a Durable Object pinned to a
+  // fixed region (US West). Without this, Cloudflare runs the Worker at
+  // whichever edge location is closest to the visitor — for some countries
+  // that lands in a colo (e.g. Hong Kong) that Google blocks outright for
+  // the Gemini API, causing "User location is not supported" errors that
+  // have nothing to do with where the actual user is.
+  const proxyId = env.GEMINI_PROXY.idFromName('gemini-proxy')
+  const proxyStub = env.GEMINI_PROXY.get(proxyId, { locationHint: 'wnam' })
+  const res = await proxyStub.fetch('https://internal/proxy', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Target-Url': apiUrl },
     body: JSON.stringify(body),
   })
 
@@ -68,12 +79,15 @@ async function handleTranslate(request, env) {
   const { text, targetLang } = await request.json()
   if (!text || !text.trim()) return errorResponse('Thiếu nội dung cần dịch.', env)
 
-  const langName = targetLang === 'en' ? 'English' : 'Vietnamese'
-  const systemInstruction = `You are a precise academic translator. Translate the given text into ${langName}, preserving technical and scientific terminology accurately and keeping an academic register. Return ONLY the translation — no notes, no quotation marks, no preamble.`
+  const systemInstruction =
+    targetLang === 'en'
+      ? `You are an expert English translator helping a Vietnamese student read and write academic material in English. Translate the given Vietnamese text into natural, fluent English — the way an English-speaking academic would actually write it, not a literal word-for-word rendering. Keep technical and scientific terminology precise. Return ONLY the translation — no notes, no quotation marks, no preamble.`
+      : `You are an expert Vietnamese translator helping a student understand an academic article written in English. Translate the given text into natural, fluent Vietnamese — the way it would actually be written in a Vietnamese academic article, not a stiff word-for-word translation. Prioritize meaning and natural Vietnamese sentence flow over mirroring the English sentence structure: feel free to reorder clauses, split a long sentence into two, or merge short ones, whatever reads most naturally. Keep technical/scientific terms accurate; if a Vietnamese term is uncommon, add the original English term in parentheses on first use. Return ONLY the translation — no notes, no quotation marks, no preamble.`
 
   const translation = await callGemini(env, {
     systemInstruction,
     contents: [{ role: 'user', parts: [{ text: text.slice(0, MAX_INPUT_CHARS) }] }],
+    temperature: 0.4,
   })
 
   return jsonResponse({ translation: translation.trim() }, env)
@@ -105,6 +119,7 @@ Rules: "original" must be an exact substring that appears in the student's text 
     systemInstruction,
     contents: [{ role: 'user', parts: [{ text: text.slice(0, MAX_INPUT_CHARS) }] }],
     jsonMode: true,
+    temperature: 0.2,
   })
 
   let parsed
@@ -134,7 +149,7 @@ ${(articleText || '').slice(0, 12000)}
       parts: [{ text: m.content }],
     }))
 
-  const answer = await callGemini(env, { systemInstruction, contents })
+  const answer = await callGemini(env, { systemInstruction, contents, temperature: 0.5 })
   return jsonResponse({ answer: answer.trim() }, env)
 }
 
@@ -158,10 +173,6 @@ function extractTitle(html) {
   return m ? decodeEntities(m[1]).replace(/\s+/g, ' ').trim() : ''
 }
 
-// Runs one HTMLRewriter pass over the HTML, collecting text found under
-// `selector`, with paragraph breaks inserted at each matched element's
-// closing tag. Cheap to re-run since it's driven from the same in-memory
-// HTML string, not a new network request.
 async function extractWithSelector(html, selector) {
   const parts = []
   const rewriter = new HTMLRewriter()
@@ -183,7 +194,7 @@ async function extractWithSelector(html, selector) {
 
   const res = new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } })
   const transformed = rewriter.transform(res)
-  await transformed.text() // draining the stream is what triggers the handlers above
+  await transformed.text()
 
   return parts
     .join('')
@@ -221,7 +232,6 @@ async function handleFetchArticle(request, env) {
   const html = await res.text()
   const title = extractTitle(html)
 
-  // Try progressively broader selectors until we get something substantial.
   let text = await extractWithSelector(html, 'article p')
   if (text.length < 200) text = await extractWithSelector(html, 'main p')
   if (text.length < 200) text = await extractWithSelector(html, 'body p')
@@ -236,6 +246,24 @@ async function handleFetchArticle(request, env) {
   }
 
   return jsonResponse({ title, text: decodeEntities(text) }, env)
+}
+
+// ---- Region-pinned proxy --------------------------------------------------
+// A Durable Object always runs in the region given by its location hint
+// (set once, on creation), regardless of where the incoming request to the
+// Worker itself was handled. It simply forwards whatever body it receives
+// to the URL given in the X-Target-Url header.
+
+export class GeminiProxy {
+  async fetch(request) {
+    const targetUrl = request.headers.get('X-Target-Url')
+    const body = await request.text()
+    return fetch(targetUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    })
+  }
 }
 
 // ---- Router -------------------------------------------------------------

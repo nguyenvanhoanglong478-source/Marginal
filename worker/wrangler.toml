@@ -2,6 +2,18 @@ name = "marginal-api"
 main = "src/index.js"
 compatibility_date = "2026-07-01"
 
+# Pins outbound Gemini API calls to a fixed, Gemini-supported region (see
+# GeminiProxy in src/index.js), instead of wherever Cloudflare happens to
+# route the incoming request — some colos (e.g. Hong Kong) are blocked by
+# Google outright, causing "User location is not supported" errors.
+[[durable_objects.bindings]]
+name = "GEMINI_PROXY"
+class_name = "GeminiProxy"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GeminiProxy"]
+
 # Optional: restrict which frontend origin may call this Worker.
 # Leave commented to allow any origin (simplest while you're testing).
 # [vars]
