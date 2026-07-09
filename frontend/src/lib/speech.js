@@ -15,13 +15,70 @@ export function isSTTSupported() {
   )
 }
 
+// ---- Voice selection ----------------------------------------------------
+const VOICE_STORAGE_KEY = 'marginal:voiceName'
+
+export function getVoices() {
+  return isTTSSupported() ? window.speechSynthesis.getVoices() : []
+}
+
+export function onVoicesReady(callback) {
+  if (!isTTSSupported()) return
+  const existing = window.speechSynthesis.getVoices()
+  if (existing.length) callback(existing)
+  window.speechSynthesis.onvoiceschanged = () => callback(window.speechSynthesis.getVoices())
+}
+
+export function getSavedVoiceName() {
+  return typeof localStorage !== 'undefined' ? localStorage.getItem(VOICE_STORAGE_KEY) || '' : ''
+}
+
+export function setSavedVoiceName(name) {
+  if (typeof localStorage === 'undefined') return
+  if (name) localStorage.setItem(VOICE_STORAGE_KEY, name)
+  else localStorage.removeItem(VOICE_STORAGE_KEY)
+}
+
+function voiceQualityScore(voice) {
+  const name = voice.name.toLowerCase()
+  let score = 0
+  if (name.includes('online')) score += 3
+  if (name.includes('natural')) score += 3
+  if (name.includes('neural')) score += 3
+  if (name.includes('google')) score += 2
+  if (voice.localService === false) score += 1
+  return score
+}
+
+function pickBestVoice(lang) {
+  const prefix = lang.slice(0, 2).toLowerCase()
+  const candidates = getVoices().filter((v) => v.lang.toLowerCase().startsWith(prefix))
+  if (!candidates.length) return null
+  return [...candidates].sort((a, b) => voiceQualityScore(b) - voiceQualityScore(a))[0]
+}
+
+function getActiveVoice(lang) {
+  const savedName = getSavedVoiceName()
+  if (savedName) {
+    const match = getVoices().find((v) => v.name === savedName)
+    if (match) return match
+  }
+  return pickBestVoice(lang)
+}
+
 let currentUtterance = null
 
 export function speak(text, { lang = 'en-US', rate = 1 } = {}) {
   if (!isTTSSupported()) return
   window.speechSynthesis.cancel()
   const utter = new SpeechSynthesisUtterance(text)
-  utter.lang = lang
+  const voice = getActiveVoice(lang)
+  if (voice) {
+    utter.voice = voice
+    utter.lang = voice.lang
+  } else {
+    utter.lang = lang
+  }
   utter.rate = rate
   currentUtterance = utter
   window.speechSynthesis.speak(utter)
@@ -37,8 +94,6 @@ export function isSpeaking() {
   return isTTSSupported() && window.speechSynthesis.speaking
 }
 
-// Starts listening once and resolves with the recognized transcript.
-// onInterim(text) is called with partial results as the user speaks.
 export function listenOnce({ lang = 'en-US', onInterim } = {}) {
   return new Promise((resolve, reject) => {
     if (!isSTTSupported()) {
@@ -73,10 +128,6 @@ export function listenOnce({ lang = 'en-US', onInterim } = {}) {
   })
 }
 
-// Simple word-level diff between what was expected and what was said,
-// used to highlight matches/mismatches for pronunciation practice.
-// This compares recognized words, not actual phoneme-level accuracy —
-// a real accuracy score would need a dedicated pronunciation-scoring API.
 export function diffWords(expected, actual) {
   const norm = (s) =>
     s
