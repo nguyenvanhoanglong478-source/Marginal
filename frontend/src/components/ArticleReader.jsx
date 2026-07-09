@@ -100,6 +100,12 @@ export default function ArticleReader() {
     }
   }
 
+  async function handleTranslateAll() {
+    setRailTab('notes')
+    setClickedIds(flatSentences.map((f) => f.id))
+    await ensureTranslations()
+  }
+
   function handleSentenceClick(id) {
     setActiveId(id)
     setRailTab('notes')
@@ -218,7 +224,7 @@ export default function ArticleReader() {
                   ))}
                 </select>
                 <button
-                  onClick={ensureTranslations}
+                  onClick={handleTranslateAll}
                   disabled={translating || !!translations}
                   className="text-xs px-3 py-1 rounded-md bg-panel hover:bg-accentSoft font-medium disabled:opacity-50"
                 >
